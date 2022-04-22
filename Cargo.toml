@@ -1,0 +1,30 @@
+[package]
+name = "drogue-opcua-agent"
+version = "0.1.0"
+authors = ["Jens Reimann <jreimann@redhat.com>"]
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+base64 = "0.13"
+chrono = "0.4"
+env_logger = "0.9"
+futures = "0.3"
+humantime = "2"
+humantime-serde = "1"
+log = "0.4"
+opcua = "0.10"
+rand = "0.8"
+rumqttc = "0.12"
+rustls = "0.20"
+rustls-native-certs = "0.6"
+serde = { version = "1", features = [ "derive" ] }
+serde_json = "1"
+serde_yaml = "0.8"
+tokio = { version = "1" }
+
+[patch.crates-io]
+# opcua = { path = "../opcua/lib" }
+opcua = { git = "https://github.com/ctron/opcua", rev = "ebe96473c95cd62555805ff192c70866270d9538" }
