@@ -23,8 +23,12 @@ rustls-native-certs = "0.6"
 serde = { version = "1", features = [ "derive" ] }
 serde_json = "1"
 serde_yaml = "0.8"
+serde_with = "1"
 tokio = { version = "1" }
 
 [patch.crates-io]
-# opcua = { path = "../opcua/lib" }
-opcua = { git = "https://github.com/ctron/opcua", rev = "ebe96473c95cd62555805ff192c70866270d9538" }
+#opcua = { path = "../opcua/lib" }
+opcua = { git = "https://github.com/ctron/opcua", rev = "074af25c172365e3779d1a4f199bc5b0d6d94483" }
+
+[profile.release]
+debug = 1

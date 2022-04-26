@@ -1,15 +1,18 @@
 use anyhow::Context;
-use futures::{select, FutureExt, Stream, StreamExt};
+use futures::channel::mpsc::SendError;
+use futures::{select, FutureExt, Sink, Stream, StreamExt};
 use rand::distributions::Alphanumeric;
 use rand::Rng;
 use rumqttc::{AsyncClient, ClientConfig, MqttOptions, QoS, Transport};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::time::Duration;
+use tokio::spawn;
 
 #[derive(Clone, Debug)]
-pub enum Event {
-    Feature { feature: String, properties: Value },
+pub struct Event {
+    pub channel: String,
+    pub payload: Value,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -60,7 +63,17 @@ impl MqttCloudConnector {
         Self { config }
     }
 
-    pub async fn run(self, stream: impl Stream<Item = Event>) -> anyhow::Result<()> {
+    pub async fn start(self) -> impl Sink<Event, Error = SendError> {
+        let (tx, rx) = futures::channel::mpsc::unbounded();
+
+        spawn(async {
+            self.run(rx).await.ok();
+        });
+
+        tx
+    }
+
+    async fn run(self, stream: impl Stream<Item = Event>) -> anyhow::Result<()> {
         let mut opts = MqttOptions::new(
             self.config.client_id.unwrap_or_else(random_id),
             self.config.host,
@@ -151,26 +164,14 @@ impl MqttCloudConnector {
     }
 
     async fn handle_event(client: &AsyncClient, event: Event) -> anyhow::Result<()> {
-        match event {
-            Event::Feature {
-                feature,
-                properties,
-            } => {
-                let payload = json!({
-                    "features": {
-                        feature: properties
-                    }
-                });
-                client
-                    .publish(
-                        "state",
-                        QoS::AtMostOnce,
-                        false,
-                        serde_json::to_vec(&payload)?,
-                    )
-                    .await?;
-            }
-        }
+        client
+            .publish(
+                event.channel,
+                QoS::AtMostOnce,
+                false,
+                serde_json::to_vec(&event.payload)?,
+            )
+            .await?;
 
         Ok(())
     }
