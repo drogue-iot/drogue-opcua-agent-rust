@@ -33,13 +33,13 @@ async fn main() -> anyhow::Result<()> {
     let middleware = Middleware::new(config.middleware);
     let cloud = MqttCloudConnector::new(config.cloud);
 
-    let opcua_stream = connector.start().await?;
-    let cloud_stream = cloud.start().await;
+    let (opcua_stream, opcua_sink) = connector.start().await;
+    let (cloud_sink, command_stream) = cloud.start().await;
 
     log::info!("Running main");
 
     middleware
-        .run(opcua_stream.into_inner(), cloud_stream)
+        .run(opcua_stream, cloud_sink, command_stream, opcua_sink)
         .await?;
 
     log::info!("Exiting main ...");

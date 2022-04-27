@@ -1,12 +1,16 @@
+use crate::middleware::{self, Update};
 use anyhow::Context;
-use futures::channel::mpsc::SendError;
-use futures::{select, FutureExt, Sink, Stream, StreamExt};
-use rand::distributions::Alphanumeric;
-use rand::Rng;
-use rumqttc::{AsyncClient, ClientConfig, MqttOptions, QoS, Transport};
+use futures::{channel::mpsc::channel, select, FutureExt, Sink, SinkExt, Stream, StreamExt};
+use percent_encoding::{percent_encode, NON_ALPHANUMERIC};
+use rand::{distributions::Alphanumeric, Rng};
+use rumqttc::{
+    AsyncClient, ClientConfig, ConnAck, ConnectReturnCode, MqttOptions, Packet, Publish, QoS,
+    Transport,
+};
+use rustls::client::NoClientSessionStorage;
 use serde::Deserialize;
 use serde_json::Value;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 use tokio::spawn;
 
 #[derive(Clone, Debug)]
@@ -63,17 +67,27 @@ impl MqttCloudConnector {
         Self { config }
     }
 
-    pub async fn start(self) -> impl Sink<Event, Error = SendError> {
+    pub async fn start(
+        self,
+    ) -> (
+        impl Sink<Event, Error = impl std::error::Error>,
+        impl Stream<Item = middleware::Event>,
+    ) {
         let (tx, rx) = futures::channel::mpsc::unbounded();
+        let (cmd_tx, cmd_rx) = channel::<middleware::Event>(1_000);
 
         spawn(async {
-            self.run(rx).await.ok();
+            self.run(rx, cmd_tx).await.ok();
         });
 
-        tx
+        (tx, cmd_rx)
     }
 
-    async fn run(self, stream: impl Stream<Item = Event>) -> anyhow::Result<()> {
+    async fn run(
+        self,
+        stream: impl Stream<Item = Event>,
+        sink: impl Sink<middleware::Event, Error = impl std::error::Error>,
+    ) -> anyhow::Result<()> {
         let mut opts = MqttOptions::new(
             self.config.client_id.unwrap_or_else(random_id),
             self.config.host,
@@ -90,10 +104,11 @@ impl MqttCloudConnector {
                 roots.add(&rustls::Certificate(cert.0))?;
             }
 
-            let client_config = ClientConfig::builder()
+            let mut client_config = ClientConfig::builder()
                 .with_safe_defaults()
                 .with_root_certificates(roots)
                 .with_no_client_auth();
+            client_config.session_storage = Arc::new(NoClientSessionStorage {});
             opts.set_transport(Transport::Tls(client_config.into()));
         }
 
@@ -101,9 +116,8 @@ impl MqttCloudConnector {
             Credentials::Password { password } => (
                 format!(
                     "{}@{}",
-                    // FIXME: need to URL encode the components
-                    self.config.identity.device,
-                    self.config.identity.application
+                    percent_encode(self.config.identity.device.as_bytes(), NON_ALPHANUMERIC),
+                    self.config.identity.application,
                 ),
                 password,
             ),
@@ -118,17 +132,31 @@ impl MqttCloudConnector {
         let (client, mut event_loop) = AsyncClient::new(opts, 10);
 
         let mut stream = StreamExt::fuse(Box::pin(stream));
-
-        // FIXME: subscribe to commands
+        let mut sink = Box::pin(sink);
 
         let mqtt = async {
             loop {
                 match event_loop.poll().await {
+                    Ok(rumqttc::Event::Incoming(Packet::ConnAck(ConnAck {
+                        session_present: false,
+                        code: ConnectReturnCode::Success,
+                    }))) => {
+                        log::debug!("Connected (without session)");
+                        if let Err(err) =
+                            client.subscribe("command/inbox//#", QoS::AtMostOnce).await
+                        {
+                            log::warn!("Failed to subscribe to commands: {err}");
+                        }
+                    }
+                    Ok(rumqttc::Event::Incoming(Packet::Publish(publish))) => {
+                        log::debug!("Received command: {publish:?}");
+                        Self::handle_command(&mut sink, publish).await;
+                    }
                     Ok(event) => {
-                        log::info!("MQTT event: {event:?}");
+                        log::debug!("MQTT event: {event:?}");
                     }
                     Err(err) => {
-                        log::warn!("Error: {err}");
+                        log::warn!("Connection error: {err}");
                     }
                 }
             }
@@ -174,6 +202,54 @@ impl MqttCloudConnector {
             .await?;
 
         Ok(())
+    }
+
+    async fn handle_command<S, E>(sink: &mut S, publish: Publish)
+    where
+        S: Sink<middleware::Event, Error = E> + Unpin,
+        E: std::error::Error,
+    {
+        log::info!("Handle command: {}", publish.topic);
+
+        #[derive(Clone, Debug, Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct WriteCommand {
+            pub connection: String,
+            pub value: Value,
+            pub node_id: String,
+        }
+
+        match publish.topic.as_str() {
+            "command/inbox//write" => {
+                let command: WriteCommand = match serde_json::from_slice(publish.payload.as_ref()) {
+                    Ok(payload) => payload,
+                    Err(err) => {
+                        log::info!("Invalid command payload: {err}");
+                        return;
+                    }
+                };
+
+                let mut update = Update::new(
+                    ["cloud", "commands", &command.connection],
+                    command.connection.clone(),
+                    command.value,
+                );
+                update
+                    .extensions
+                    .insert("nodeId".to_string(), command.node_id.into());
+
+                log::info!("Scheduling write command: {update:?}");
+
+                let updates = vec![update];
+
+                if let Err(err) = sink.send(middleware::Event { updates }).await {
+                    log::warn!("Failed to queue command: {err}");
+                }
+            }
+            _ => {
+                log::info!("Invalid command: {}", publish.topic);
+            }
+        }
     }
 }
 

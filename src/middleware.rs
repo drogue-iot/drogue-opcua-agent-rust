@@ -1,5 +1,5 @@
 use crate::mqtt;
-use futures::{Sink, SinkExt, Stream, StreamExt};
+use futures::{select, Sink, SinkExt, Stream, StreamExt};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use serde_with::{serde_as, DeserializeFromStr};
@@ -103,6 +103,8 @@ impl Display for Address {
 pub struct Configuration {
     #[serde(default)]
     pub sources: HashMap<Address, Source>,
+    #[serde(default)]
+    pub sinks: HashMap<Address, Source>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
@@ -153,23 +155,39 @@ impl Middleware {
         Self { config }
     }
 
-    pub async fn run<E>(
+    pub async fn run(
         self,
         events: impl Stream<Item = Event>,
-        cloud: impl Sink<mqtt::Event, Error = E>,
-    ) -> anyhow::Result<()>
-    where
-        E: std::error::Error + Send + Sync + 'static,
-    {
-        let mut events = Box::pin(events);
+        cloud: impl Sink<mqtt::Event, Error = impl std::error::Error + Send + Sync + 'static>,
+        command_stream: impl Stream<Item = Event>,
+        commands: impl Sink<Event, Error = impl std::error::Error + Send + Sync + 'static>,
+    ) -> anyhow::Result<()> {
+        let mut events = Box::pin(events).fuse();
         let mut cloud = Box::pin(cloud);
+        let mut command_stream = Box::pin(command_stream).fuse();
+        let mut commands = Box::pin(commands);
+
         loop {
-            match events.next().await {
-                None => {
-                    break;
+            select! {
+                event = events.next() => {
+                    match event {
+                        None => {
+                            break;
+                        }
+                        Some(event) => {
+                            self.handle_event(event, &mut cloud).await?;
+                        }
+                    }
                 }
-                Some(event) => {
-                    self.handle_event(event, &mut cloud).await?;
+                command = command_stream.next() => {
+                    match command {
+                        None => {
+                            break;
+                        }
+                        Some(command) => {
+                            self.handle_command(command, &mut commands).await?;
+                        }
+                    }
                 }
             }
         }
@@ -179,25 +197,49 @@ impl Middleware {
         Ok(())
     }
 
+    async fn handle_command<S, E>(&self, command: Event, agent: &mut S) -> Result<(), E>
+    where
+        S: Sink<Event, Error = E> + Unpin,
+        E: std::error::Error,
+    {
+        for event in self.process_command(command) {
+            log::info!("Handle command: {event:?}");
+            agent.send(event).await?;
+        }
+        Ok(())
+    }
+
     async fn handle_event<S, E>(&self, event: Event, cloud: &mut S) -> Result<(), E>
     where
         S: Sink<mqtt::Event, Error = E> + Unpin,
         E: std::error::Error,
     {
-        for event in self.process(event) {
+        for event in self.process_event(event) {
             cloud.send(event).await?;
         }
 
         Ok(())
     }
 
-    fn process(&self, event: Event) -> Vec<mqtt::Event> {
+    fn process_command(&self, command: Event) -> Vec<Event> {
+        log::info!("Process command: {command:?}");
+
+        let updates = command
+            .updates
+            .into_iter()
+            .filter_map(|u| Self::process_update(&self.config.sinks, u))
+            .collect();
+
+        vec![Event { updates }]
+    }
+
+    fn process_event(&self, event: Event) -> Vec<mqtt::Event> {
         let mut compacted = HashMap::<String, mqtt::Event>::new();
 
         for update in event
             .updates
             .into_iter()
-            .filter_map(|u| self.process_update(u))
+            .filter_map(|u| Self::process_update(&self.config.sources, u))
         {
             let feature = update
                 .extensions
@@ -230,13 +272,13 @@ impl Middleware {
         compacted.into_values().collect()
     }
 
-    fn process_update(&self, mut update: Update) -> Option<Update> {
+    fn process_update(config: &HashMap<Address, Source>, mut update: Update) -> Option<Update> {
         // collect relevant sources, from least specific, to most specific
         let mut sources = vec![];
         for i in 0..=update.address.0.len() {
             let path = &update.address.as_slice()[..i];
             log::debug!("Checking path: {path:?}");
-            if let Some(config) = self.config.sources.get(path) {
+            if let Some(config) = config.get(path) {
                 sources.push(config);
             }
         }

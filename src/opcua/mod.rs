@@ -2,23 +2,27 @@ mod config;
 
 pub use config::*;
 
-use crate::middleware::{Address, Event, Update};
-use crate::ToJson;
+use crate::{
+    middleware::{Address, Event, Update},
+    ToJson,
+};
 use anyhow::anyhow;
 use futures::{
-    channel::mpsc::{Receiver, SendError, Sender},
-    SinkExt,
+    channel::mpsc::{channel, Receiver, SendError, Sender},
+    Sink, SinkExt, Stream, StreamExt,
 };
 use opcua::client::prelude::*;
-use serde_json::json;
-use std::collections::HashMap;
-use std::time::SystemTime;
+use serde_json::{json, Value};
 use std::{
+    collections::HashMap,
     ops::{Deref, DerefMut},
     str::FromStr,
     sync::{Arc, RwLock},
+    time::SystemTime,
 };
-use tokio::runtime::Handle;
+use tokio::sync::oneshot;
+use tokio::task::spawn_blocking;
+use tokio::{runtime::Handle, spawn};
 
 pub struct OpcUaConnector {
     connections: HashMap<String, OpcUaConnection>,
@@ -162,22 +166,61 @@ impl OpcUaConnector {
         Self { connections }
     }
 
-    pub async fn start(self) -> anyhow::Result<EventStream> {
-        let (tx, rx) = futures::channel::mpsc::channel::<Event>(1_000);
+    pub async fn start(
+        self,
+    ) -> (
+        impl Stream<Item = Event>,
+        impl Sink<Event, Error = impl std::error::Error>,
+    ) {
+        let (tx, rx) = channel::<Event>(1_000);
+        let (cmd_tx, mut cmd_rx) = channel::<Event>(1_000);
 
         let tx = EventSender(tx);
 
-        for (_, connection) in self.connections {
-            connection.start(tx.clone()).await;
+        let mut commands = HashMap::with_capacity(self.connections.len());
+        for (id, connection) in self.connections {
+            let cmd = connection.start(tx.clone());
+            commands.insert(id, Box::pin(cmd));
         }
 
-        Ok(EventStream(rx))
+        spawn(async move {
+            loop {
+                match cmd_rx.next().await {
+                    None => {
+                        break;
+                    }
+                    Some(event) => {
+                        log::info!("Dispatch command: {event:?}");
+                        Self::handle_command(&mut commands, event).await;
+                    }
+                }
+            }
+        });
+
+        (rx, cmd_tx)
+    }
+
+    async fn handle_command(
+        connections: &mut HashMap<String, impl Sink<Update> + Unpin>,
+        event: Event,
+    ) {
+        for update in event.updates {
+            if let Some(commands) = connections.get_mut(&update.channel) {
+                if let Err(_) = commands.send(update).await {
+                    log::warn!("Failed to queue command");
+                }
+            }
+        }
     }
 }
 
 impl OpcUaConnection {
     pub fn new(id: String, config: Connection) -> Self {
         Self { id, config }
+    }
+
+    pub async fn command(&self, update: Update) {
+        log::info!("Handling command update: {update:?}");
     }
 
     pub fn subscribe(
@@ -267,11 +310,19 @@ impl OpcUaConnection {
         Ok(())
     }
 
-    pub async fn start(self, tx: EventSender) {
-        Handle::current().spawn_blocking(move || self.do_run(tx));
+    pub fn start(self, tx: EventSender) -> impl Sink<Update> {
+        let (cmd_tx, cmd_rx) = channel::<Update>(1_000);
+
+        Handle::current().spawn_blocking(move || self.do_run(tx, cmd_rx));
+
+        cmd_tx
     }
 
-    fn do_run(mut self, mut tx: EventSender) -> anyhow::Result<()> {
+    fn do_run(
+        mut self,
+        mut tx: EventSender,
+        commands: impl Stream<Item = Update> + Send + 'static,
+    ) -> anyhow::Result<()> {
         let client = ClientBuilder::new()
             .application_name("Drogue IoT OPC UA Agent")
             .application_uri("https://drogue.io")
@@ -338,13 +389,122 @@ impl OpcUaConnection {
 
         self.subscribe(session.clone(), tx.clone())?;
 
-        Session::run(session);
+        let (session_tx, rx) = oneshot::channel();
+
+        let cmd_session = session.clone();
+        spawn(async move {
+            Self::command_loop(cmd_session, commands).await;
+            log::warn!("Command loop exited");
+            session_tx.send(SessionCommand::Stop).ok();
+        });
+
+        // the next call will block, until the session loop terminates
+        Session::run_loop(session, 10, rx);
 
         log::warn!("Session loop exited. Terminating...");
 
         tx.0.close_channel();
 
+        // done
+
         Ok(())
+    }
+
+    async fn command_loop(session: Arc<RwLock<Session>>, commands: impl Stream<Item = Update>) {
+        let mut commands = Box::pin(commands);
+        loop {
+            match commands.next().await {
+                None => {
+                    log::info!("Command queue closed");
+                    break;
+                }
+                Some(update) => {
+                    let session = session.clone();
+                    spawn_blocking(move || match session.read() {
+                        Ok(session) => {
+                            Self::write_command(&session, update);
+                        }
+                        Err(_) => {
+                            log::warn!("Failed to lock session");
+                        }
+                    });
+                }
+            }
+        }
+    }
+
+    fn write_command(session: &Session, update: Update) {
+        log::debug!("Writing command: {update:?}");
+
+        let node_id = update
+            .extensions
+            .get("nodeId")
+            .and_then(|id| id.as_str())
+            .or_else(|| update.address.last().map(|s| s.as_str()));
+
+        let node_id = if let Some(node_id) = node_id {
+            node_id
+        } else {
+            return;
+        };
+
+        let node_id = match NodeId::from_str(&node_id) {
+            Ok(node_id) => node_id,
+            Err(err) => {
+                log::info!("Failed to parse NodeId: {err}");
+                return;
+            }
+        };
+
+        let value = DataValue::value_only(update.value.into_variant());
+
+        let value = WriteValue {
+            node_id,
+            attribute_id: AttributeId::Value as u32,
+            index_range: Default::default(),
+            value,
+        };
+
+        if let Err(err) = session.write(&[value]) {
+            log::info!("Failed to write: {err}");
+        }
+    }
+}
+
+pub trait IntoVariant {
+    fn into_variant(self) -> Variant;
+}
+
+impl IntoVariant for Value {
+    fn into_variant(self) -> Variant {
+        match self {
+            Value::Null => Variant::Empty,
+            Value::Bool(value) => value.into(),
+            Value::Number(value) => {
+                if let Some(value) = value.as_u64() {
+                    value.into()
+                } else if let Some(value) = value.as_i64() {
+                    value.into()
+                } else if let Some(value) = value.as_f64() {
+                    value.into()
+                } else {
+                    log::warn!("Unknown numeric type");
+                    Variant::StatusCode(StatusCode::BadInvalidArgument)
+                }
+            }
+            Value::String(value) => value.into(),
+            Value::Array(_) => {
+                log::debug!("Arrays are only supported using the complex object type");
+                Variant::StatusCode(StatusCode::BadDataEncodingUnsupported)
+            }
+            Value::Object(obj) => match serde_json::from_value::<Variant>(Value::Object(obj)) {
+                Ok(value) => value,
+                Err(err) => {
+                    log::debug!("Failed to deserialize variant: {err}");
+                    Variant::StatusCode(StatusCode::BadDataEncodingInvalid)
+                }
+            },
+        }
     }
 }
 
@@ -383,4 +543,73 @@ fn connection_state(connection: &str, timestamp: String, code: StatusCode) -> Up
             })
         },
     )
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    fn setup() {
+        env_logger::try_init().ok();
+    }
+
+    #[test]
+    fn test_variant_simple() {
+        setup();
+
+        assert_eq!(Value::Null.into_variant(), Variant::Empty);
+        assert_eq!(json!(true).into_variant(), Variant::Boolean(true));
+        assert_eq!(json!(100).into_variant(), Variant::UInt64(100));
+        assert_eq!(json!(-100).into_variant(), Variant::Int64(-100));
+        assert_eq!(json!(1.23).into_variant(), Variant::Double(1.23));
+    }
+
+    #[test]
+    fn test_variant_invalid() {
+        setup();
+
+        assert_eq!(
+            json!([false, 1, "2"]).into_variant(),
+            Variant::StatusCode(StatusCode::BadDataEncodingUnsupported)
+        );
+        assert_eq!(
+            json!({}).into_variant(),
+            Variant::StatusCode(StatusCode::BadDataEncodingInvalid)
+        );
+    }
+
+    #[test]
+    fn test_variant_complex() {
+        setup();
+
+        assert_eq!(
+            json!({
+                "Int32": 100,
+            })
+            .into_variant(),
+            Variant::Int32(100)
+        );
+
+        assert_eq!(
+            json!({
+                "Array": {
+                    "value_type": "Byte",
+                    "values": [
+                        { "Byte": 1 },
+                        { "Byte": 2 },
+                        { "Byte": 3 },
+                    ],
+                    "dimensions": []
+                },
+            })
+            .into_variant(),
+            Variant::Array(Box::new(
+                Array::new_single(
+                    VariantTypeId::Byte,
+                    [Variant::Byte(1), Variant::Byte(2), Variant::Byte(3)]
+                )
+                .unwrap()
+            ))
+        );
+    }
 }
