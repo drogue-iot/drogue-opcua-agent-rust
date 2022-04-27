@@ -20,6 +20,6 @@ FROM registry.access.redhat.com/ubi8/ubi-minimal:latest
 
 LABEL org.opencontainers.image.source="https://github.com/drogue-iot/drogue-opcua-agent-rust"
 
-COPY --from=builder /usr/src/drogue-opcua-agent-rust/target/release/drogue-opcua-agent /
+COPY --from=builder /usr/src/drogue-opcua-agent/target/release/drogue-opcua-agent /
 
 ENTRYPOINT [ "/drogue-opcua-agent" ]
