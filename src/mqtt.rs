@@ -170,7 +170,6 @@ impl MqttCloudConnector {
                     log::info!("Data event: {event:?}");
                     match event {
                         Some(event) => {
-                            // FIXME: handle error differently
                             Self::handle_event(&client, event).await?;
                         }
                         None => {

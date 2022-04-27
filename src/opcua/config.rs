@@ -14,6 +14,23 @@ pub struct Configuration {
 #[serde(rename_all = "camelCase")]
 pub struct Connection {
     pub url: String,
+
+    pub security_policy: String,
+    pub security_mode: String,
+
+    #[serde(default)]
+    pub auto_accept_server_certificate: bool,
+
+    #[serde(default)]
+    pub create_sample_keypair: bool,
+
+    #[serde(default)]
+    #[serde(with = "humantime_serde")]
+    pub session_timeout: Option<Duration>,
+
+    #[serde(default)]
+    pub session_retry_limit: Option<i32>,
+
     #[serde(default)]
     pub credentials: Credentials,
 
@@ -26,44 +43,9 @@ pub struct Connection {
 pub struct Subscription {
     #[serde(default = "defaults::publish_interval", with = "humantime_serde")]
     pub publish_interval: Duration,
-    pub nodes: Vec<Node>,
+    pub nodes: Vec<String>,
     #[serde(default)]
     pub timestamps: Timestamps,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(untagged)]
-pub enum Node {
-    Simple(String),
-    Complex(NodeDefinition),
-}
-
-impl Node {
-    pub fn node_id(&self) -> &str {
-        match self {
-            Self::Simple(node_id) => &node_id,
-            Self::Complex(NodeDefinition { id, .. }) => &id,
-        }
-    }
-}
-
-impl From<Node> for NodeDefinition {
-    fn from(value: Node) -> Self {
-        match value {
-            Node::Simple(id) => NodeDefinition {
-                id,
-                ..Default::default()
-            },
-            Node::Complex(def) => def,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-pub struct NodeDefinition {
-    pub id: String,
-    #[serde(default)]
-    pub alias: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]

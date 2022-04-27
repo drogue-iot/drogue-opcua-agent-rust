@@ -6,13 +6,15 @@ use crate::{
     middleware::{Address, Event, Update},
     ToJson,
 };
-use anyhow::anyhow;
+use anyhow::{anyhow, bail};
 use futures::{
-    channel::mpsc::{channel, Receiver, SendError, Sender},
+    channel::mpsc::{channel, Receiver, Sender},
     Sink, SinkExt, Stream, StreamExt,
 };
 use opcua::client::prelude::*;
 use serde_json::{json, Value};
+use std::path::PathBuf;
+use std::time::Duration;
 use std::{
     collections::HashMap,
     ops::{Deref, DerefMut},
@@ -86,13 +88,6 @@ impl EventSender {
                 log::warn!("Failed to queue updates: {err}");
             }
         });
-    }
-
-    async fn send_all(&mut self, events: Vec<Event>) -> Result<(), SendError> {
-        for event in events {
-            self.0.feed(event).await?;
-        }
-        self.0.flush().await
     }
 }
 
@@ -266,13 +261,7 @@ impl OpcUaConnection {
         let items_to_create: Vec<_> = subscription
             .nodes
             .iter()
-            .map(|node| {
-                NodeId::from_str(match &node {
-                    Node::Simple(id) => id,
-                    Node::Complex(def) => &def.id,
-                })
-                .map(|node| node.into())
-            })
+            .map(|node| NodeId::from_str(&node).map(|node| node.into()))
             .collect::<Result<_, _>>()?;
 
         let result = session.create_monitored_items(
@@ -313,7 +302,11 @@ impl OpcUaConnection {
     pub fn start(self, tx: EventSender) -> impl Sink<Update> {
         let (cmd_tx, cmd_rx) = channel::<Update>(1_000);
 
-        Handle::current().spawn_blocking(move || self.do_run(tx, cmd_rx));
+        Handle::current().spawn_blocking(move || {
+            if let Err(err) = self.do_run(tx, cmd_rx) {
+                log::error!("Failed to run OPC connection: {err}");
+            }
+        });
 
         cmd_tx
     }
@@ -323,16 +316,24 @@ impl OpcUaConnection {
         mut tx: EventSender,
         commands: impl Stream<Item = Update> + Send + 'static,
     ) -> anyhow::Result<()> {
+        let pki_dir = std::env::var_os("PKI_DIR")
+            .map(|p| PathBuf::from(p))
+            .unwrap_or_else(|| std::env::temp_dir().join("drogue-opcua-agent").join("pki"));
+
         let client = ClientBuilder::new()
             .application_name("Drogue IoT OPC UA Agent")
             .application_uri("https://drogue.io")
             .product_uri("https://drogue.io")
-            // FIXME: this is insecure
-            .trust_server_certs(true)
-            // FIXME: this is insecure
-            .create_sample_keypair(true)
-            .session_timeout(15_000)
-            .session_retry_limit(3);
+            .trust_server_certs(self.config.auto_accept_server_certificate)
+            .create_sample_keypair(self.config.create_sample_keypair)
+            .session_timeout(
+                self.config
+                    .session_timeout
+                    .unwrap_or_else(|| Duration::from_secs(15))
+                    .as_millis() as _,
+            )
+            .session_retry_limit(self.config.session_retry_limit.unwrap_or(3))
+            .pki_dir(pki_dir);
 
         let id = match &self.config.credentials {
             Credentials::Anonymous => IdentityToken::Anonymous,
@@ -345,13 +346,18 @@ impl OpcUaConnection {
             .client()
             .ok_or_else(|| anyhow!("Invalid configuration"))?;
 
+        let security_mode = match self.config.security_mode.as_str() {
+            "None" | "none" => MessageSecurityMode::None,
+            "Sign" | "sign" => MessageSecurityMode::Sign,
+            "SignAndEncrypt" | "signAndEncrypt" => MessageSecurityMode::SignAndEncrypt,
+            _ => bail!("Invalid security mode. Must be: none, sign, or signAndEncrypt"),
+        };
+
         let session = client.connect_to_endpoint(
             (
                 self.config.url.as_str(),
-                // FIXME: this is insecure
-                SecurityPolicy::None.to_str(),
-                // FIXME: this is insecure
-                MessageSecurityMode::None,
+                self.config.security_policy.as_str(),
+                security_mode,
                 // FIXME: this is insecure
                 UserTokenPolicy::anonymous(),
             ),
@@ -362,6 +368,7 @@ impl OpcUaConnection {
             let sender = ConnectionEventSender {
                 connection: self.id.clone(),
                 sender: tx.clone(),
+                // we parse and re-encode the node id to have a normalized form
                 subscriptions: self
                     .config
                     .subscriptions
@@ -372,9 +379,9 @@ impl OpcUaConnection {
                             subs.nodes
                                 .iter()
                                 .map(|n| {
-                                    NodeId::from_str(n.node_id())
-                                        .map(|n| n.to_string())
-                                        .unwrap_or_else(|_| n.node_id().to_string())
+                                    NodeId::from_str(n)
+                                        .map(|id| id.to_string())
+                                        .unwrap_or_else(|_| n.to_string())
                                 })
                                 .collect::<Vec<_>>(),
                         )
