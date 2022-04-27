@@ -358,8 +358,7 @@ impl OpcUaConnection {
                 self.config.url.as_str(),
                 self.config.security_policy.as_str(),
                 security_mode,
-                // FIXME: this is insecure
-                UserTokenPolicy::anonymous(),
+                None,
             ),
             id,
         )?;
