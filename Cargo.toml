@@ -30,6 +30,10 @@ tokio = "1"
 [patch.crates-io]
 #opcua = { path = "../opcua/lib" }
 opcua = { git = "https://github.com/ctron/opcua", rev = "074af25c172365e3779d1a4f199bc5b0d6d94483" }
+#opcua = { git = "https://github.com/lovasoa/opcua", branch = "fix-zombie-tasks" }
 
 [profile.release]
 debug = 1
+
+[features]
+opcua_0_11 = []

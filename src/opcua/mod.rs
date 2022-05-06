@@ -2,6 +2,12 @@ mod config;
 
 pub use config::*;
 
+#[cfg(feature = "opcua_0_11")]
+use opcua::sync::RwLock;
+
+#[cfg(not(feature = "opcua_0_11"))]
+use std::sync::RwLock;
+
 use crate::{
     middleware::{Address, Event, Update},
     ToJson,
@@ -19,7 +25,7 @@ use std::{
     collections::HashMap,
     ops::{Deref, DerefMut},
     str::FromStr,
-    sync::{Arc, RwLock},
+    sync::Arc,
     time::SystemTime,
 };
 use tokio::sync::oneshot;
@@ -225,6 +231,9 @@ impl OpcUaConnection {
     ) -> anyhow::Result<()> {
         log::debug!("Creating subscriptions");
 
+        #[cfg(feature = "opcua_0_11")]
+        let session = session.read();
+        #[cfg(not(feature = "opcua_0_11"))]
         let session = session.read().unwrap();
 
         for (id, sub) in &self.config.subscriptions {
@@ -363,7 +372,12 @@ impl OpcUaConnection {
             id,
         )?;
 
-        if let Ok(mut session) = session.write() {
+        {
+            #[cfg(feature = "opcua_0_11")]
+            let mut session = session.write();
+            #[cfg(not(feature = "opcua_0_11"))]
+            let mut session = session.write().unwrap();
+
             let sender = ConnectionEventSender {
                 connection: self.id.clone(),
                 sender: tx.clone(),
@@ -426,13 +440,12 @@ impl OpcUaConnection {
                 }
                 Some(update) => {
                     let session = session.clone();
-                    spawn_blocking(move || match session.read() {
-                        Ok(session) => {
-                            Self::write_command(&session, update);
-                        }
-                        Err(_) => {
-                            log::warn!("Failed to lock session");
-                        }
+                    spawn_blocking(move || {
+                        #[cfg(feature = "opcua_0_11")]
+                        let session = session.read();
+                        #[cfg(not(feature = "opcua_0_11"))]
+                        let session = session.read().unwrap();
+                        Self::write_command(&session, update);
                     });
                 }
             }
