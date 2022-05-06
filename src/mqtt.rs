@@ -13,6 +13,9 @@ use serde_json::Value;
 use std::{sync::Arc, time::Duration};
 use tokio::spawn;
 
+#[cfg(feature = "megolm")]
+use vodozemac::megolm::{GroupSession, GroupSessionPickle};
+
 #[derive(Clone, Debug)]
 pub struct Event {
     pub channel: String,
@@ -50,6 +53,10 @@ pub struct Configuration {
     #[serde(default)]
     #[serde(with = "humantime_serde")]
     pub keep_alive: Option<Duration>,
+
+    #[cfg(feature = "megolm")]
+    #[serde(default)]
+    pub group_session_pickle: Option<String>,
 }
 
 mod defaults {
@@ -59,12 +66,31 @@ mod defaults {
 }
 
 pub struct MqttCloudConnector {
+    #[cfg(feature = "megolm")]
+    group_session: Option<GroupSession>,
     config: Configuration,
 }
 
 impl MqttCloudConnector {
-    pub fn new(config: Configuration) -> Self {
-        Self { config }
+    #[cfg(not(feature = "megolm"))]
+    pub fn new(config: Configuration) -> anyhow::Result<Self> {
+        Ok(Self { config })
+    }
+
+    #[cfg(feature = "megolm")]
+    pub fn new(config: Configuration) -> anyhow::Result<Self> {
+        let group_session = match &config.group_session_pickle {
+            None => None,
+            Some(pickle) => {
+                log::info!("Enabling Megolm Group Session");
+                Some(serde_json::from_str::<GroupSessionPickle>(&pickle)?.into())
+            }
+        };
+
+        Ok(Self {
+            config,
+            group_session,
+        })
     }
 
     pub async fn start(
@@ -84,13 +110,17 @@ impl MqttCloudConnector {
     }
 
     async fn run(
-        self,
+        mut self,
         stream: impl Stream<Item = Event>,
         sink: impl Sink<middleware::Event, Error = impl std::error::Error>,
     ) -> anyhow::Result<()> {
         let mut opts = MqttOptions::new(
-            self.config.client_id.unwrap_or_else(random_id),
-            self.config.host,
+            self.config
+                .client_id
+                .as_ref()
+                .cloned()
+                .unwrap_or_else(random_id),
+            &self.config.host,
             self.config.port,
         );
 
@@ -112,16 +142,16 @@ impl MqttCloudConnector {
             opts.set_transport(Transport::Tls(client_config.into()));
         }
 
-        let (username, password) = match self.config.credentials {
+        let (username, password) = match &self.config.credentials {
             Credentials::Password { password } => (
                 format!(
                     "{}@{}",
                     percent_encode(self.config.identity.device.as_bytes(), NON_ALPHANUMERIC),
-                    self.config.identity.application,
+                    &self.config.identity.application,
                 ),
-                password,
+                password.clone(),
             ),
-            Credentials::Username { username, password } => (username, password),
+            Credentials::Username { username, password } => (username.clone(), password.clone()),
         };
 
         opts.set_credentials(username, password);
@@ -170,7 +200,7 @@ impl MqttCloudConnector {
                     log::info!("Data event: {event:?}");
                     match event {
                         Some(event) => {
-                            Self::handle_event(&client, event).await?;
+                            self.handle_event(&client, event).await?;
                         }
                         None => {
                             // Stream ended
@@ -186,18 +216,16 @@ impl MqttCloudConnector {
 
             }
         }
-
-        //Ok(())
     }
 
-    async fn handle_event(client: &AsyncClient, event: Event) -> anyhow::Result<()> {
+    async fn handle_event(&mut self, client: &AsyncClient, event: Event) -> anyhow::Result<()> {
+        let payload = serde_json::to_string(&event.payload)?;
+
+        #[cfg(feature = "megolm")]
+        let payload = self.encrypt(payload);
+
         client
-            .publish(
-                event.channel,
-                QoS::AtMostOnce,
-                false,
-                serde_json::to_vec(&event.payload)?,
-            )
+            .publish(event.channel, QoS::AtMostOnce, false, payload)
             .await?;
 
         Ok(())
@@ -250,6 +278,14 @@ impl MqttCloudConnector {
             }
         }
     }
+
+    fn encrypt(&mut self, payload: String) -> Vec<u8> {
+        if let Some(group_session) = &mut self.group_session {
+            group_session.encrypt(&payload).to_bytes()
+        } else {
+            payload.into_bytes()
+        }
+    }
 }
 
 fn random_id() -> String {
@@ -291,6 +327,8 @@ mod test {
                     password: "password1".to_string()
                 },
                 keep_alive: None,
+                #[cfg(feature = "megolm")]
+                group_session_pickle: None,
             }
         );
     }

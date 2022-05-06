@@ -31,7 +31,7 @@ async fn main() -> anyhow::Result<()> {
 
     let connector = OpcUaConnector::new(config.opcua);
     let middleware = Middleware::new(config.middleware);
-    let cloud = MqttCloudConnector::new(config.cloud);
+    let cloud = MqttCloudConnector::new(config.cloud)?;
 
     let (opcua_stream, opcua_sink) = connector.start().await;
     let (cloud_sink, command_stream) = cloud.start().await;
