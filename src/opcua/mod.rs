@@ -3,9 +3,15 @@ mod config;
 pub use config::*;
 
 #[cfg(feature = "opcua_0_11")]
-use opcua::sync::RwLock;
+pub use opcua_0_11 as opcua;
 
-#[cfg(not(feature = "opcua_0_11"))]
+#[cfg(feature = "opcua_0_11")]
+use opcua_0_11::sync::RwLock;
+
+#[cfg(feature = "opcua_0_10")]
+pub use opcua_0_10 as opcua;
+
+#[cfg(feature = "opcua_0_10")]
 use std::sync::RwLock;
 
 use crate::{
@@ -19,18 +25,15 @@ use futures::{
 };
 use opcua::client::prelude::*;
 use serde_json::{json, Value};
-use std::path::PathBuf;
-use std::time::Duration;
 use std::{
     collections::HashMap,
     ops::{Deref, DerefMut},
+    path::PathBuf,
     str::FromStr,
     sync::Arc,
-    time::SystemTime,
+    time::{Duration, SystemTime},
 };
-use tokio::sync::oneshot;
-use tokio::task::spawn_blocking;
-use tokio::{runtime::Handle, spawn};
+use tokio::{runtime::Handle, spawn, sync::oneshot, task::spawn_blocking};
 
 pub struct OpcUaConnector {
     connections: HashMap<String, OpcUaConnection>,

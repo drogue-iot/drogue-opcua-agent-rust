@@ -16,7 +16,6 @@ futures = "0.3"
 humantime = "2"
 humantime-serde = "1"
 log = "0.4"
-opcua = "0.10"
 percent-encoding = "2"
 rand = "0.8"
 rumqttc = "0.12"
@@ -30,10 +29,15 @@ tokio = "1"
 
 vodozemac = { version = "0.1", optional = true }
 
+opcua_0_10 = { version = "0.10", package = "opcua", optional = true }
+opcua_0_11 = { version = "0.11", package = "opcua", optional = true }
+
 [patch.crates-io]
 #opcua = { path = "../opcua/lib" }
-opcua = { git = "https://github.com/ctron/opcua", rev = "074af25c172365e3779d1a4f199bc5b0d6d94483" }
-#opcua = { git = "https://github.com/lovasoa/opcua", branch = "fix-zombie-tasks" }
+opcua_0_10 = { package = "opcua", git = "https://github.com/ctron/opcua", rev = "074af25c172365e3779d1a4f199bc5b0d6d94483" }
+
+#opcua = { git = "https://github.com/lovasoa/opcua", branch = "fix-zombie-tasks", rev = "2fbc9c6cdd443b154fdd7c091c77f603062508d8"}
+opcua_0_11 = { package = "opcua", git = "https://github.com/lovasoa/opcua", rev = "2fbc9c6cdd443b154fdd7c091c77f603062508d8" }
 
 vodozemac = { git = "https://github.com/matrix-org/vodozemac", rev = "13414b3b1737755562adc00602f6a1809e404f85" } # FIXME: awaiting release with megolm
 
@@ -41,8 +45,7 @@ vodozemac = { git = "https://github.com/matrix-org/vodozemac", rev = "13414b3b17
 debug = 1
 
 [features]
-default = ["megolm"]
-opcua_0_11 = []
+default = ["opcua_0_11", "megolm"]
 megolm = ["vodozemac"]
 
 [[bin]]

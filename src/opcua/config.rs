@@ -1,4 +1,4 @@
-use opcua::types::TimestampsToReturn;
+use crate::opcua::opcua::types::TimestampsToReturn;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::default::Default;

@@ -1,6 +1,8 @@
+use crate::opcua::opcua::types::{
+    DataValue, DateTime, QualifiedName, StatusCode, UAString, Variant,
+};
 use chrono::{SecondsFormat, Utc};
 use humantime::format_rfc3339_millis;
-use opcua::types::{DataValue, DateTime, QualifiedName, StatusCode, UAString, Variant};
 use serde_json::{json, Map, Value};
 use std::time::SystemTime;
 

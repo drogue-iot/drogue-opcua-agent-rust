@@ -342,7 +342,8 @@ dependencies = [
  "humantime",
  "humantime-serde",
  "log",
- "opcua",
+ "opcua 0.10.0",
+ "opcua 0.11.0",
  "percent-encoding 2.1.0",
  "rand 0.8.5",
  "rumqttc",
@@ -820,6 +821,38 @@ dependencies = [
  "log",
  "openssl",
  "openssl-sys",
+ "regex",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "serde_yaml",
+ "time",
+ "tokio",
+ "tokio-util",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "opcua"
+version = "0.11.0"
+source = "git+https://github.com/lovasoa/opcua?rev=2fbc9c6cdd443b154fdd7c091c77f603062508d8#2fbc9c6cdd443b154fdd7c091c77f603062508d8"
+dependencies = [
+ "base64 0.12.3",
+ "bitflags",
+ "byteorder",
+ "bytes",
+ "chrono",
+ "derivative",
+ "foreign-types",
+ "futures",
+ "gethostname",
+ "lazy_static",
+ "libc",
+ "log",
+ "openssl",
+ "openssl-sys",
+ "parking_lot",
  "regex",
  "serde",
  "serde_derive",
