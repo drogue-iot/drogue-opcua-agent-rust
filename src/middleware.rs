@@ -3,10 +3,9 @@ use futures::{select, Sink, SinkExt, Stream, StreamExt};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use serde_with::{serde_as, DeserializeFromStr};
-use std::borrow::Borrow;
-use std::collections::hash_map;
 use std::{
-    collections::HashMap,
+    borrow::Borrow,
+    collections::{hash_map, HashMap},
     convert::Infallible,
     fmt::{Debug, Display, Formatter},
     ops::{Deref, DerefMut},

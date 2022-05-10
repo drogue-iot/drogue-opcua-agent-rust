@@ -45,7 +45,7 @@ vodozemac = { git = "https://github.com/matrix-org/vodozemac", rev = "13414b3b17
 debug = 1
 
 [features]
-default = ["opcua_0_10", "megolm"]
+default = ["opcua_0_10"]
 megolm = ["vodozemac"]
 
 [[bin]]

@@ -279,6 +279,7 @@ impl MqttCloudConnector {
         }
     }
 
+    #[cfg(feature = "megolm")]
     fn encrypt(&mut self, payload: String) -> Vec<u8> {
         if let Some(group_session) = &mut self.group_session {
             group_session.encrypt(&payload).to_bytes()
