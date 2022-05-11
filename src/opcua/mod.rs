@@ -344,7 +344,12 @@ impl OpcUaConnection {
                     .unwrap_or_else(|| Duration::from_secs(15))
                     .as_millis() as _,
             )
-            .session_retry_limit(self.config.session_retry_limit.unwrap_or(3))
+            .session_retry_limit(
+                self.config
+                    .session_retry_limit
+                    .map(|r| r as i32)
+                    .unwrap_or(-1),
+            )
             .pki_dir(pki_dir);
 
         let id = match &self.config.credentials {

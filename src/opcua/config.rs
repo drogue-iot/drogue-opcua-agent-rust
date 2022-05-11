@@ -29,7 +29,7 @@ pub struct Connection {
     pub session_timeout: Option<Duration>,
 
     #[serde(default)]
-    pub session_retry_limit: Option<i32>,
+    pub session_retry_limit: Option<u16>,
 
     #[serde(default)]
     pub credentials: Credentials,
