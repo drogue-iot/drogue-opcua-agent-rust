@@ -1,3 +1,4 @@
+pub mod data;
 pub mod middleware;
 pub mod mqtt;
 pub mod opcua;

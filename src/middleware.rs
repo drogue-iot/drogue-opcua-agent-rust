@@ -1,11 +1,14 @@
-use crate::mqtt;
+use crate::{
+    data::{DataLayer, FeatureDataLayer},
+    mqtt,
+};
 use futures::{select, Sink, SinkExt, Stream, StreamExt};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::Value;
 use serde_with::{serde_as, DeserializeFromStr};
 use std::{
     borrow::Borrow,
-    collections::{hash_map, HashMap},
+    collections::HashMap,
     convert::Infallible,
     fmt::{Debug, Display, Formatter},
     ops::{Deref, DerefMut},
@@ -118,6 +121,7 @@ pub struct Source {
 
 pub struct Middleware {
     config: Configuration,
+    data: FeatureDataLayer,
 }
 
 #[derive(Clone, Debug)]
@@ -151,11 +155,14 @@ impl Update {
 
 impl Middleware {
     pub fn new(config: Configuration) -> Self {
-        Self { config }
+        Self {
+            config,
+            data: FeatureDataLayer::new(),
+        }
     }
 
     pub async fn run(
-        self,
+        mut self,
         events: impl Stream<Item = Event>,
         cloud: impl Sink<mqtt::Event, Error = impl std::error::Error + Send + Sync + 'static>,
         command_stream: impl Stream<Item = Event>,
@@ -208,7 +215,7 @@ impl Middleware {
         Ok(())
     }
 
-    async fn handle_event<S, E>(&self, event: Event, cloud: &mut S) -> Result<(), E>
+    async fn handle_event<S, E>(&mut self, event: Event, cloud: &mut S) -> Result<(), E>
     where
         S: Sink<mqtt::Event, Error = E> + Unpin,
         E: std::error::Error,
@@ -232,43 +239,13 @@ impl Middleware {
         vec![Event { updates }]
     }
 
-    fn process_event(&self, event: Event) -> Vec<mqtt::Event> {
-        let mut compacted = HashMap::<String, mqtt::Event>::new();
-
-        for update in event
-            .updates
-            .into_iter()
-            .filter_map(|u| Self::process_update(&self.config.sources, u))
-        {
-            let feature = update
-                .extensions
-                .get("feature")
-                .and_then(|f| f.as_str())
-                .or_else(|| update.address.last().map(|s| s.as_str()))
-                .map(|s| s.to_string());
-
-            if let Some(feature) = feature {
-                match compacted.entry(update.channel.clone()) {
-                    hash_map::Entry::Vacant(entry) => {
-                        entry.insert(mqtt::Event {
-                            channel: update.channel,
-                            payload: json!({
-                                "features": {
-                                    feature: update.value,
-                                }
-                            }),
-                        });
-                    }
-                    hash_map::Entry::Occupied(mut entry) => {
-                        if let Value::Object(features) = &mut entry.get_mut().payload["features"] {
-                            features.insert(feature, update.value);
-                        }
-                    }
-                }
-            }
-        }
-
-        compacted.into_values().collect()
+    fn process_event(&mut self, event: Event) -> Vec<mqtt::Event> {
+        self.data.update(
+            event
+                .updates
+                .into_iter()
+                .filter_map(|u| Self::process_update(&self.config.sources, u)),
+        )
     }
 
     fn process_update(config: &HashMap<Address, Source>, mut update: Update) -> Option<Update> {
