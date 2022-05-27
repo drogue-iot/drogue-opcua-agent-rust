@@ -1,0 +1,68 @@
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: doppelgaenger-input
+  annotations:
+    image.openshift.io/triggers: '[{"from":{"kind":"ImageStreamTag","name":"doppelgaenger-input:latest"},"fieldPath":"spec.template.spec.containers[?(@.name==\"app\")].image"}]'
+  labels:
+    app.kubernetes.io/name: doppelgaenger-input
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: doppelgaenger-input
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  template:
+    metadata:
+      annotations:
+        prometheus.io/scrape: "true"    # must be quoted
+        prometheus.io/port: "8081"      # must be quoted
+        prometheus.io/path: "/metrics"  # it defaults to /metrics
+      labels:
+        app.kubernetes.io/name: doppelgaenger-input
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: app
+          image: doppelgaenger-input
+          imagePullPolicy: Always
+          env:
+            - name: RUST_LOG
+              value: info
+            - name: METRICS__BIND_ADDR
+              value: 0.0.0.0:8081
+            - name: KAFKA__BOOTSTRAP_SERVERS
+#              value: drogue-iot-kafka-bootstrap-drogue-dev.apps.wonderful.iot-playground.org:443
+              value: drogue-iot-kafka-bootstrap.drogue-iot.svc:9092
+            - name: KAFKA__PROPERTIES__SECURITY_PROTOCOL
+              value: SASL_PLAINTEXT
+            - name: KAFKA__PROPERTIES__SASL_MECHANISM
+              value: SCRAM-SHA-512
+            - name: KAFKA__PROPERTIES__SASL_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: doppelgaenger-config
+                  key: kafka.username
+            - name: KAFKA__PROPERTIES__SASL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: doppelgaenger-config
+                  key: kafka.password
+            - name: KAFKA__TOPIC
+              value: events-ctron-opcua
+            - name: KAFKA__PROPERTIES__GROUP_ID
+              value: drogue-twin
+            - name: MONGODB__URL
+              valueFrom:
+                secretKeyRef:
+                  name: doppelgaenger-config
+                  key: mongodb.url
+            - name: MONGODB__DATABASE
+              value: twin-db
+          ports:
+            - containerPort: 8081
+              name: metrics
