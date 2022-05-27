@@ -83,7 +83,15 @@ impl MqttCloudConnector {
             None => None,
             Some(pickle) => {
                 log::info!("Enabling Megolm Group Session");
-                Some(serde_json::from_str::<GroupSessionPickle>(&pickle)?.into())
+                let session: GroupSession =
+                    serde_json::from_str::<GroupSessionPickle>(&pickle)?.into();
+                log::info!(
+                    "Group session - index: {}, key: {}",
+                    session.message_index(),
+                    session.session_key().to_base64()
+                );
+
+                Some(session)
             }
         };
 
@@ -197,7 +205,7 @@ impl MqttCloudConnector {
         loop {
             select! {
                 event = stream.next() => {
-                    log::info!("Data event: {event:?}");
+                    log::debug!("Data event: {event:?}");
                     match event {
                         Some(event) => {
                             self.handle_event(&client, event).await?;
@@ -223,6 +231,8 @@ impl MqttCloudConnector {
 
         #[cfg(feature = "megolm")]
         let payload = self.encrypt(payload);
+
+        log::debug!("Sending payload: {payload:?}");
 
         client
             .publish(event.channel, QoS::AtMostOnce, false, payload)
@@ -283,6 +293,8 @@ impl MqttCloudConnector {
     fn encrypt(&mut self, payload: String) -> Vec<u8> {
         if let Some(group_session) = &mut self.group_session {
             group_session.encrypt(&payload).to_bytes()
+
+            20.to_be_bytes()
         } else {
             payload.into_bytes()
         }

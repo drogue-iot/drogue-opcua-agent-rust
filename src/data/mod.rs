@@ -1,10 +1,21 @@
+mod full;
+
+pub use full::*;
+
 use crate::{middleware::Update, mqtt};
 use serde_json::{json, Value};
 use std::collections::{hash_map, HashMap};
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum DataError {
+    #[error("Failed to encode data: {0}")]
+    Encoding(#[source] serde_json::Error),
+}
 
 /// A data layer, handling data towards the cloud.
 pub trait DataLayer {
-    fn update<I>(&mut self, updates: I) -> Vec<mqtt::Event>
+    fn update<I>(&mut self, updates: I) -> Result<Vec<mqtt::Event>, DataError>
     where
         I: Iterator<Item = Update>;
 }
@@ -19,7 +30,7 @@ impl FeatureDataLayer {
 }
 
 impl DataLayer for FeatureDataLayer {
-    fn update<I>(&mut self, updates: I) -> Vec<mqtt::Event>
+    fn update<I>(&mut self, updates: I) -> Result<Vec<mqtt::Event>, DataError>
     where
         I: Iterator<Item = Update>,
     {
@@ -54,6 +65,6 @@ impl DataLayer for FeatureDataLayer {
             }
         }
 
-        compacted.into_values().collect()
+        Ok(compacted.into_values().collect())
     }
 }

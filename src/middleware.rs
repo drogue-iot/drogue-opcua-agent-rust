@@ -1,5 +1,5 @@
 use crate::{
-    data::{DataLayer, FeatureDataLayer},
+    data::{self, DataError, DataLayer},
     mqtt,
 };
 use futures::{select, Sink, SinkExt, Stream, StreamExt};
@@ -14,6 +14,15 @@ use std::{
     ops::{Deref, DerefMut},
     str::FromStr,
 };
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum ProcessError<E: Debug + std::error::Error> {
+    #[error("Data layer error: {0}")]
+    Data(#[from] DataError),
+    #[error("Sink error: {0}")]
+    Sink(E),
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd, DeserializeFromStr)]
 pub struct Address(Vec<String>);
@@ -119,9 +128,14 @@ pub struct Source {
     pub extensions: HashMap<String, Value>,
 }
 
+#[cfg(not(feature = "megolm"))]
+type ActualDataLayer = data::FeatureDataLayer;
+#[cfg(feature = "megolm")]
+type ActualDataLayer = data::FullFeatureDataLayer;
+
 pub struct Middleware {
     config: Configuration,
-    data: FeatureDataLayer,
+    data: ActualDataLayer,
 }
 
 #[derive(Clone, Debug)]
@@ -157,7 +171,7 @@ impl Middleware {
     pub fn new(config: Configuration) -> Self {
         Self {
             config,
-            data: FeatureDataLayer::new(),
+            data: ActualDataLayer::new(),
         }
     }
 
@@ -215,13 +229,17 @@ impl Middleware {
         Ok(())
     }
 
-    async fn handle_event<S, E>(&mut self, event: Event, cloud: &mut S) -> Result<(), E>
+    async fn handle_event<S, E>(
+        &mut self,
+        event: Event,
+        cloud: &mut S,
+    ) -> Result<(), ProcessError<E>>
     where
         S: Sink<mqtt::Event, Error = E> + Unpin,
         E: std::error::Error,
     {
-        for event in self.process_event(event) {
-            cloud.send(event).await?;
+        for event in self.process_event(event)? {
+            cloud.send(event).await.map_err(ProcessError::Sink)?;
         }
 
         Ok(())
@@ -239,7 +257,7 @@ impl Middleware {
         vec![Event { updates }]
     }
 
-    fn process_event(&mut self, event: Event) -> Vec<mqtt::Event> {
+    fn process_event(&mut self, event: Event) -> Result<Vec<mqtt::Event>, DataError> {
         self.data.update(
             event
                 .updates
